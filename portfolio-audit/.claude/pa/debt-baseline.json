@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-16",
+  "commit": "1c2c4664",
+  "files": 602,
+  "lines": 132594,
+  "large": 19,
+  "inLarge": 42281,
+  "medium": 26,
+  "generic": 57,
+  "dbOutside": 64,
+  "repositories": 10,
+  "fatPages": 16,
+  "layer": 1
+}

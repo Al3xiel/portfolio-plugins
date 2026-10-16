@@ -1,0 +1,41 @@
+{
+  "$comment": "Módulo → rutas de código y su doc corto. pa.mjs module elige el más específico (prefijo más largo). Un módulo sin docs se documenta con /pa-module-doc <módulo>.",
+  "modules": {
+    "auditorias": {
+      "paths": ["apps/backend/src/modules/auditorias/", "apps/backend/src/audit-types/", "apps/backend/src/validation-types/", "apps/frontend/src/app/(app)/audit/", "apps/frontend/src/components/audit/"],
+      "docs": ["docs/auditorias/catalogo-de-reglas.md"]
+    },
+    "blackboard": {
+      "paths": ["apps/backend/src/modules/blackboard/", "apps/frontend/src/app/(app)/blackboard/", "apps/frontend/src/components/blackboard/"],
+      "docs": ["docs/blackboard-extraction/README.md", "docs/blackboard-extraction/backend.md", "docs/blackboard-extraction/frontend.md"]
+    },
+    "evidencias": {
+      "paths": ["apps/backend/src/modules/evidence/", "apps/backend/src/modules/auditorias/evidencias/", "apps/frontend/src/components/evidencias/"],
+      "docs": ["docs/portafolio-evidencias/README.md", "docs/portafolio-evidencias/backend.md", "docs/portafolio-evidencias/frontend.md"]
+    },
+    "abet-rubrics": {
+      "paths": ["apps/backend/src/academic/abet-rubrics", "apps/frontend/src/services/academic-abet-rubrics"],
+      "docs": ["docs/abet-rubrics/README.md", "docs/abet-rubrics/backend.md", "docs/abet-rubrics/frontend.md"]
+    },
+    "academico": {
+      "paths": ["apps/backend/src/academic/", "apps/backend/src/acreditacion/", "apps/backend/src/system-sync/", "apps/frontend/src/app/(app)/academic/"],
+      "docs": ["docs/datos-academicos-desde-acreditacion.md", "docs/normalizacion-sincronizacion-academica.md", "docs/articulations-endpoint.md"]
+    },
+    "motor-acc-ia": {
+      "paths": ["apps/backend/src/llm/", "apps/backend/src/abet/", "apps/backend/src/documents/", "apps/backend/src/source-documents/"],
+      "docs": []
+    },
+    "acceso": {
+      "paths": ["apps/backend/src/auth/", "apps/backend/src/roles/", "apps/backend/src/s3/", "apps/backend/src/users/", "apps/frontend/src/app/(app)/roles/", "apps/frontend/src/app/(app)/users/", "apps/frontend/src/app/(app)/s3/"],
+      "docs": []
+    },
+    "pruebas": {
+      "paths": ["apps/backend/src/modules/pruebas/"],
+      "docs": []
+    },
+    "parametros": {
+      "paths": ["apps/backend/src/parameters/", "apps/frontend/src/app/(app)/parameters/"],
+      "docs": []
+    }
+  }
+}

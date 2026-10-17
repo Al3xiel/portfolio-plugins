@@ -1,7 +1,7 @@
 ---
 name: pa-quick
 description: "Lean lane: plan and build a small, low-risk change in one session with the same TDD proofs and no subagents. A script refuses migrations, auth/S3/LLM paths, both packages, >4 tasks or >8 files. Cost: light-medium."
-argument-hint: "<request> | .claude/pa/work/<slug>.md"
+argument-hint: "<request> | .claude/pa/work/plan-<slug>.md"
 disable-model-invocation: true
 ---
 
@@ -46,3 +46,8 @@ plan `## Unplanned — <qué y por qué>` y propone `/pa-implement` con ese plan
 
 `node .claude/pa/pa.mjs diff` — si dice `deep`, el cambio creció: dilo. Propón commits
 (Conventional Commits, una línea). Sin commit sin aprobación. Siguiente: `/pa-audit`.
+
+Un cambio de este carril es chico, y cada merge a `main` corre el pipeline completo: no lo mandes
+solo. Al terminar, sugiere sumar la siguiente tarea chica a esta misma rama, o juntarla con otra
+rama abierta, y abrir el PR (`/pa-create-pr`) cuando el lote valga un despliegue o el usuario lo
+necesite en producción.

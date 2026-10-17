@@ -1,7 +1,7 @@
 ---
 name: pa-define-task
-description: "Request → a short plan in .claude/pa/work/<slug>.md with verified facts, scope check and testable tasks; ends by choosing /pa-quick or /pa-implement. Cost: light."
-argument-hint: "<what you want to build or change>"
+description: "Request → a short plan in .claude/pa/work/plan-<slug>.md with verified facts, scope check and testable tasks; ends by choosing /pa-quick or /pa-implement. Cost: light."
+argument-hint: "<what you want to build or change> | .claude/pa/proposals/prop-<slug>.md"
 disable-model-invocation: true
 ---
 
@@ -9,6 +9,28 @@ disable-model-invocation: true
 
 Entrada: `$ARGUMENTS`. Salida: un plan corto y, si el usuario aprueba, la rama. El plan es la
 memoria de trabajo de la rama (no se commitea): permite `/clear` antes de implementar sin perder nada.
+
+**Actualizar una tarea** (la rama ya tiene `.claude/pa/work/plan-<slug>.md`, o `$ARGUMENTS` lo nombra):
+no se escribe un plan nuevo encima. `node .claude/pa/pa.mjs tasks` (solo lo abierto) y edita el plan
+con `Edit`:
+- lo nuevo, como tareas `- [ ]` al final del lote que corresponda;
+- lo que ya no aplica, `- [-] T3 … (obsoleta: <motivo>, <fecha>)`: se conserva su historia, no se borra;
+- las tareas cerradas y su evidencia no se tocan. Si una cerrada queda invalidada por el cambio, se
+  reabre como tarea nueva que la referencia, no editando la vieja;
+- el cambio, una línea en *Decisions* con la fecha.
+Luego `node .claude/pa/pa.mjs gate` otra vez (una migración o un segundo paquete sacan la tarea del
+carril rápido) y `node .claude/pa/pa.mjs overlap <slug>` si toca algo que otros planes también tocan.
+Explora solo lo que el cambio agrega.
+
+**Desde una propuesta** (`$ARGUMENTS` es `.claude/pa/proposals/prop-<slug>.md`, de `/pa-plan-feature`):
+`node .claude/pa/pa.mjs proposals` primero. Si está `aprobada` y no desactualizada, su *Necesidad*,
+*Alcance*, *Impacto* y *Riesgos* ya están verificados: **no los re-explores**, parte de ahí y baja al
+nivel de tarea (archivos exactos, tests, Scope check, Endpoints, Reutilización). Si no está aprobada,
+pregunta antes de seguir. Si está desactualizada, revisa solo lo que cambió. Al terminar el plan
+(`plan-<slug>.md`, mismo slug sin el `prop-`), **no edites la propuesta a mano**:
+`node .claude/pa/pa.mjs convert prop-<slug>` archiva su contenido en el plan (sección *Propuesta original*,
+que `tasks` no lee), enlaza el `Origen:`, **borra la propuesta**,
+cambia el miembro en todas las sesiones y actualiza las notas de *Coordinación* que la citaban.
 
 ## 1. Contexto — un solo mensaje, todo en paralelo
 
@@ -28,7 +50,7 @@ se decide y se anota.
 
 ## 3. El plan
 
-`.claude/pa/work/<slug>.md` (slug en kebab-case; la rama será `feat/<slug>` o `fix/<slug>`):
+`.claude/pa/work/plan-<slug>.md` (slug en kebab-case con el prefijo `plan-`; la rama será `feat/<slug>` o `fix/<slug>`, sin prefijo):
 
 ```
 # <slug>
@@ -67,13 +89,19 @@ Branch: `feat/<slug>` (from `main` <sha>)
   `assertCanView` y la nueva no, es un agujero. Cada ruta nueva lleva su tarea de spec de acceso.
 - Lo que este diseño no pregunte lo encuentra la auditoría, en el ciclo de corrección más caro.
 
-Rutas completas desde la raíz (la compuerta solo cuenta esas). Tareas chicas y verticales.
-Pronóstico de más de ~600 líneas → propone PRs encadenados.
+Rutas completas desde la raíz (la compuerta solo cuenta esas). Tareas chicas y verticales: chicas
+para implementar y probar, no para mergear — **toda la feature va en un solo PR**, porque cada merge
+a `main` corre el pipeline completo. Si una parte tiene que llegar a producción antes que el resto,
+pregúntalo y anótalo en *Decisions*; el tamaño solo no justifica partir.
 
 ## 4. Carril y rama
 
-`node .claude/pa/pa.mjs gate .claude/pa/work/<slug>.md` → `RÁPIDO` (`/pa-quick`) o `COMPLETO`
-(`/pa-implement`, con las razones del script). Rama solo con aprobación.
+`node .claude/pa/pa.mjs gate .claude/pa/work/plan-<slug>.md` → `RÁPIDO` (`/pa-quick`) o `COMPLETO`
+(`/pa-implement`, con las razones del script).
+
+**Rama:** antes de crear una nueva, mira `git branch --no-merged main`. Si hay una rama abierta del
+mismo módulo o un arreglo chico pendiente de PR, propón **sumar** esta tarea ahí (un PR, un pipeline).
+Rama nueva solo si el usuario lo aprueba y no hay dónde sumarla.
 
 Cierre en 3 líneas: plan, tareas, carril. Sugiere `/clear` antes del siguiente paso: el plan
 lleva todo lo necesario y la sesión siguiente arranca sin la exploración a cuestas.

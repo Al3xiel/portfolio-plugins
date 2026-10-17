@@ -19,7 +19,7 @@
     },
     "academico": {
       "paths": ["apps/backend/src/academic/", "apps/backend/src/acreditacion/", "apps/backend/src/system-sync/", "apps/frontend/src/app/(app)/academic/"],
-      "docs": ["docs/datos-academicos-desde-acreditacion.md", "docs/normalizacion-sincronizacion-academica.md", "docs/articulations-endpoint.md"]
+      "docs": ["docs/academico/README.md", "docs/datos-academicos-desde-acreditacion.md", "docs/normalizacion-sincronizacion-academica.md", "docs/articulations-endpoint.md"]
     },
     "motor-acc-ia": {
       "paths": ["apps/backend/src/llm/", "apps/backend/src/abet/", "apps/backend/src/documents/", "apps/backend/src/source-documents/"],

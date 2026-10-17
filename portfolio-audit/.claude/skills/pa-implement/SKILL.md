@@ -1,7 +1,7 @@
 ---
 name: pa-implement
 description: "Execute the open tasks of the branch plan in TDD batches, writing RED/GREEN evidence back so a later session resumes from the plan alone. Sonnet subagents only for 3+ independent tasks. Never commits. Cost: heavy; `serial` never fans out."
-argument-hint: "[.claude/pa/work/<slug>.md] [serial]"
+argument-hint: "[.claude/pa/work/plan-<slug>.md] [serial]"
 disable-model-invocation: true
 ---
 

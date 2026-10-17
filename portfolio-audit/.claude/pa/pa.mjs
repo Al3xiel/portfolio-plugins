@@ -16,6 +16,12 @@
  *   node .claude/pa/pa.mjs gate      [plan]                              ¿cabe el plan en /pa-quick?
  *   node .claude/pa/pa.mjs tasks     [plan]                              el plan sin lo ya cerrado
  *   node .claude/pa/pa.mjs debt      [--save] [--days 180] [--top 10]     deuda estructural, línea base y puntos calientes
+ *   node .claude/pa/pa.mjs impact    <ruta|carpeta>…                      costo de tocar esas rutas: tamaño, deuda, superficie, specs, docs
+ *   node .claude/pa/pa.mjs session   new|add|remove|show|close|list …      agrupar planes y propuestas en sesiones (sin moverlos)
+ *   node .claude/pa/pa.mjs convert   <prop-slug> [plan-slug]               tras /pa-define-task: propuesta → plan en sesiones y referencias
+ *   node .claude/pa/pa.mjs prefix-docs [--dry-run]                        migración única: prefijos plan-/prop- y referencias
+ *   node .claude/pa/pa.mjs overlap   [doc…] [--session s] [--top 15]                    dónde se cruzan planes y propuestas, con la línea de cada uno
+ *   node .claude/pa/pa.mjs proposals [--status aprobada]                  propuestas de funcionalidades y si quedaron desactualizadas
  *   node .claude/pa/pa.mjs module    [ruta… | módulo]                    qué doc corto leer antes de explorar, y si está desactualizado
  *   node .claude/pa/pa.mjs ledger    add <entradas.json> | report        registro de auditorías: precisión de reglas y qué promover
  *   node .claude/pa/pa.mjs backtest  [--last 30] [--labels <tsv>]        las reglas sobre PRs ya mergeados
@@ -74,7 +80,7 @@ const IGNORED = /^(\.idea|\.vscode|\.claude|\.atl|odd)\//;
 /** Lo único que `exec` acepta (misma expresión en hooks/filter-output.mjs). */
 const SAFE_EXEC = /^\s*(cd\s+[\w./\\:-]+\s*&&\s*)?(npx\s+(jest|vitest|tsc|eslint)|npm\s+(test|run\s+(test|lint)))(\s+[^;&|`$()<>\n]*)?$/;
 /** Flags sin valor: lo que les sigue es un argumento posicional. */
-const BOOLEAN_FLAGS = new Set(['tsc', 'json', 'save', 'check']);
+const BOOLEAN_FLAGS = new Set(['tsc', 'json', 'save', 'check', 'dry-run', 'keep']);
 /** Secciones del plan que una sesión necesita; el resto se busca con Grep si hace falta. */
 const KEEP_SECTIONS = /^(objective|scope|scope check|constraints|decisions)\b/i;
 
@@ -546,6 +552,15 @@ function cmdPr() {
     }
   }
   const upstream = git(['rev-parse', '--abbrev-ref', '@{u}'], true)?.trim();
+  // Cada merge a main corre el pipeline completo: lo que no toca la app no merece uno propio, y las
+  // ramas abiertas son candidatas a juntarse en un solo PR.
+  const appCode = [...files.keys()].some((f) => /^apps\/|^docker\/|^\.github\//.test(f));
+  const recent = Date.now() / 1000 - 14 * 86400; // una rama quieta hace semanas no es candidata a juntarse
+  const open = git(['for-each-ref', '--no-merged', base, '--sort=-committerdate', '--format=%(refname:short)\t%(committerdate:relative)\t%(committerdate:unix)', 'refs/heads', 'refs/remotes/origin'], true)
+    ?.split('\n').filter(Boolean).map((l) => l.split('\t'))
+    .filter(([ref, , ts]) => Number(ts) > recent && !/^(origin\/)?backup\//.test(ref))
+    .filter(([ref]) => ref !== branch && ref !== `origin/${branch}` && ref !== 'origin/HEAD')
+    .filter(([ref], _, all) => !ref.startsWith('origin/') || !all.some(([r]) => r === ref.slice(7))) ?? [];
   const plan = planForBranch(false);
   const objective = plan ? (readFileSync(join(ROOT, plan), 'utf8').match(/^## Objective\s*\n+([^\n#]+)/m)?.[1]?.trim()) : null;
   console.log([
@@ -557,6 +572,8 @@ function cmdPr() {
     `paquetes: ${packagesOf([...files.keys()]).join(', ') || 'ninguno'}   archivos: ${files.size}`,
     migrations.length ? `MIGRACIONES (se aplican al hacer merge):\n${migrations.map((m) => '  ' + m).join('\n')}` : 'migraciones: ninguna',
     routes.length ? `endpoints nuevos o tocados:\n${routes.join('\n')}` : 'endpoints nuevos: ninguno',
+    appCode ? '' : 'SIN CÓDIGO DE APP: un merge solo de docs/config corre igual el pipeline completo — súmalo a otra rama o al próximo PR con código',
+    open.length ? `otras ramas abiertas sin mergear (candidatas a juntar en un PR) :\n${open.slice(0, 8).map(([r, d]) => `  ${r} (${d})`).join('\n')}` : 'otras ramas abiertas sin mergear: ninguna',
     `compare: https://github.com/UPC-ABET/PORTFOLIO-AUDIT/compare/${base}...${branch}?expand=1`,
   ].filter(Boolean).join('\n'));
 }
@@ -564,7 +581,7 @@ function cmdPr() {
 // ── gate / tasks (planes en .claude/pa/work) ───────────────────────────────────────────
 function cmdGate(file) {
   file = file || planForBranch(true);
-  const text = readFileSync(join(ROOT, file), 'utf8');
+  const text = withoutArchive(readFileSync(join(ROOT, file), 'utf8').replace(/\r\n/g, '\n'));
   const tasks = (text.match(/^\s*- \[[ x]\]/gim) || []).length;
   const mentioned = [...new Set([...text.matchAll(/`((?:apps|\.github|docker)\/[^`\s:]+)`/g)].map((m) => m[1]))];
   const source = mentioned.filter(isSource);
@@ -574,7 +591,7 @@ function cmdGate(file) {
   if (source.length > QUICK.files) refuse.push(`${source.length} archivos de código > ${QUICK.files}`);
   if (packages.length > 1) refuse.push('toca backend y frontend');
   for (const s of sensitiveHits(mentioned)) refuse.push(`ruta sensible: ${s}`);
-  if (/prisma migrate|migration\.sql|schema\.prisma/i.test(text)) refuse.push('incluye migración');
+  if (plansMigration(text)) refuse.push('incluye migración');
   if (/new module|módulo nuevo|nuevo módulo/i.test(text)) refuse.push('crea un módulo nuevo');
   if (/^##\s*(Open questions|Preguntas abiertas)\s*\n+\s*-\s+(?!\(?ning|none)/im.test(text)) refuse.push('preguntas de producto abiertas');
   if (!/^##\s*Scope check/im.test(text)) refuse.push('falta "## Scope check"');
@@ -593,7 +610,7 @@ function cmdTasks(file) {
   file = file || planForBranch(true);
   const lines = readFileSync(join(ROOT, file), 'utf8').split('\n');
   const out = [], skipped = [];
-  let section = null, inTasks = false, block = null, heading = null, open = 0, done = 0;
+  let section = null, inTasks = false, block = null, heading = null, open = 0, done = 0, obsolete = 0;
   const flush = () => {
     if (block?.open) { if (heading) { out.push(heading); heading = null; } out.push(...block.lines); }
     block = null;
@@ -610,8 +627,9 @@ function cmdTasks(file) {
     if (section === null) { if (line.trim()) out.push(line); continue; }
     if (inTasks) {
       if (/^###\s/.test(line)) { flush(); heading = line; continue; }
-      const t = line.match(/^- \[( |x)\]/i);
-      if (t) { flush(); t[1] === ' ' ? open++ : done++; block = { open: t[1] === ' ', lines: [line] }; continue; }
+      // `- [-]` = obsoleta tras un cambio de alcance: se conserva su historia, no se trabaja ni se cuenta.
+      const t = line.match(/^- \[( |x|-)\]/i);
+      if (t) { flush(); t[1] === ' ' ? open++ : t[1] === '-' ? obsolete++ : done++; block = { open: t[1] === ' ', lines: [line] }; continue; }
       if (block) block.lines.push(line);
       continue;
     }
@@ -619,16 +637,27 @@ function cmdTasks(file) {
   }
   flush();
   console.log([
-    `${file}: ${done} tareas cerradas (omitidas), ${open} abiertas`,
+    `${file}: ${done} tareas cerradas (omitidas), ${open} abiertas${obsolete ? `, ${obsolete} obsoletas (omitidas)` : ''}`,
     skipped.length ? `secciones omitidas (Grep si hacen falta): ${skipped.join(' · ')}` : '',
     ...out,
   ].filter((l, i) => i > 1 || l).join('\n'));
 }
 
+/**
+ * ¿El plan hace una migración? Se decide por sus tareas (abiertas o hechas, no las obsoletas): citar
+ * `schema.prisma` en el Problem como referencia no es migrar (falso positivo en plan-bbc-all-courses-view).
+ */
+function plansMigration(text) {
+  const tasks = text.split('\n').filter((l) => /^\s*- \[( |x)\]/i.test(l)).join('\n');
+  return /schema\.prisma|migrations?\/|migration\.sql|\bmigraci[oó]n\b(?!:? no)/i.test(tasks);
+}
+
 /** `feat/<slug>` → `.claude/pa/work/<slug>.md`. */
 function planForBranch(required) {
   const branch = currentBranch();
-  const file = `${WORK}/${branch.replace(/^[^/]+\//, '')}.md`;
+  const slug = branch.replace(/^[^/]+\//, '');
+  // feat/<slug> → plan-<slug>.md (y el nombre viejo sin prefijo, por si queda alguno)
+  const file = [`${WORK}/plan-${slug}.md`, `${WORK}/${slug}.md`].find((f) => existsSync(join(ROOT, f))) ?? `${WORK}/plan-${slug}.md`;
   if (existsSync(join(ROOT, file))) return file;
   if (!required) return null;
   console.error(`no hay plan para la rama "${branch}" (${file}); pásalo como argumento o créalo con /pa-define-task`);
@@ -637,7 +666,8 @@ function planForBranch(required) {
 
 function planSummary(file) {
   const text = readFileSync(join(ROOT, file), 'utf8');
-  return `plan (${file}): ${(text.match(/^\s*- \[x\]/gim) || []).length} hechas, ${(text.match(/^\s*- \[ \]/gm) || []).length} abiertas`;
+  const obsolete = (text.match(/^\s*- \[-\]/gm) || []).length;
+  return `plan (${file}): ${(text.match(/^\s*- \[x\]/gim) || []).length} hechas, ${(text.match(/^\s*- \[ \]/gm) || []).length} abiertas${obsolete ? `, ${obsolete} obsoletas` : ''}`;
 }
 
 // ── debt ────────────────────────────────────────────────────────────────────────────────
@@ -697,6 +727,431 @@ function cmdDebt() {
   if (args.check) out.push(worse.length ? `CHECK: empeora ${worse.map((k) => `${k} ${base[k]} → ${snapshot[k]}`).join(', ')}` : 'CHECK: la deuda no creció');
   console.log(out.join('\n'));
   if (worse.length) process.exit(1);
+}
+
+// ── impact / proposals (planificación de funcionalidades) ──────────────────────────────
+/**
+ * Lo que costaría tocar estas rutas, en una llamada: módulo y doc, tamaño, si es un punto caliente
+ * de deuda (cambios y fixes recientes), superficie sensible y si tiene spec. Para planificar sin
+ * abrir los archivos: el modelo decide con estos hechos, no explorando.
+ */
+function cmdImpact(targets) {
+  if (!targets.length) { console.error('uso: pa.mjs impact <ruta|carpeta>…'); process.exit(2); }
+  const tracked = git(['ls-files', '--', 'apps']).split('\n').filter(Boolean);
+  const files = [...new Set(targets.map(norm).flatMap((t) => tracked.filter((f) => f === t || f.startsWith(t.replace(/\/?$/, '/')))))]
+    .filter((f) => /\.tsx?$/.test(f) && !/\.(spec|test)\.tsx?$/.test(f));
+  if (!files.length) { console.log(`ningún archivo de código bajo: ${targets.join(', ')}`); return; }
+  const since = git(['log', '--since=180.days', '--format=%x00%s', '--name-only', '--', ...targets.map(norm)]);
+  const changes = new Map(), fixes = new Map();
+  for (const block of since.split('\0').filter(Boolean)) {
+    const [subject, ...names] = block.split('\n');
+    for (const f of names.filter(Boolean)) {
+      changes.set(f, (changes.get(f) || 0) + 1);
+      if (/^fix/.test(subject)) fixes.set(f, (fixes.get(f) || 0) + 1);
+    }
+  }
+  const rows = files.map((f) => ({ f, lines: lineCount(f), ch: changes.get(f) || 0, fx: fixes.get(f) || 0,
+    spec: ['.spec.ts', '.spec.tsx'].some((e) => existsSync(join(ROOT, f.replace(/\.tsx?$/, e)))) }))
+    .sort((a, b) => b.lines * (b.ch + 1) - a.lines * (a.ch + 1));
+  const sensitive = sensitiveHits(files);
+  const total = rows.reduce((s, r) => s + r.lines, 0);
+  console.log([
+    `${files.length} archivo(s), ${total} líneas · paquetes: ${packagesOf(files).join(', ')}`,
+    sensitive.length ? `superficie sensible: ${sensitive.join(', ')}` : 'superficie sensible: ninguna',
+    `puntos calientes (> ${LARGE} líneas): ${rows.filter((r) => r.lines > LARGE).length} · sin spec al lado: ${rows.filter((r) => !r.spec && /service|util|calc|rule|mapper|client|repository/.test(r.f)).length}`,
+    ...rows.slice(0, 12).map((r) => `  ${r.f}  ${r.lines} líneas · ${r.ch} cambios/${r.fx} fixes en 180 días${r.lines > LARGE ? ' · GIGANTE' : ''}${r.spec ? '' : ' · sin spec'}`),
+    rows.length > 12 ? `  … y ${rows.length - 12} más` : '',
+  ].filter(Boolean).join('\n'));
+  cmdModule(files.slice(0, 20));
+}
+
+const PROPOSALS = '.claude/pa/proposals';
+
+/** Las propuestas por estado, y si el código que citan cambió desde que se escribieron. */
+function cmdProposals() {
+  for (const n of syncSessions()) console.log(n);
+  const dir = join(ROOT, PROPOSALS);
+  const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.md')).sort() : [];
+  if (!files.length) { console.log('sin propuestas: /pa-plan-feature <idea> crea la primera'); return; }
+  const out = [];
+  for (const f of files) {
+    const text = readFileSync(join(dir, f), 'utf8');
+    const status = text.match(/^Estado:\s*([^\n·]+)/m)?.[1]?.trim() ?? '?';
+    if (args.status && !status.toLowerCase().startsWith(String(args.status).toLowerCase())) continue;
+    const title = text.match(/^#\s+(.+)/m)?.[1] ?? f;
+    const sha = text.match(/^Fecha:.*Base:\s*\S+\s+([0-9a-f]{7,})/m)?.[1];
+    const effort = text.match(/^##\s*Esfuerzo\s*\n+\s*\**([SML])\b/m)?.[1] ?? '?';
+    const cited = [...new Set([...text.matchAll(/`(apps\/[^`\s:]+)`/g)].map((m) => m[1]))];
+    let stale = '';
+    if (sha && cited.length && !/^(convertida|descartada)/i.test(status)) {
+      const n = git(['rev-list', '--count', `${sha}..HEAD`, '--', ...cited], true)?.trim();
+      if (n && Number(n) > 0) stale = ` · el código citado tuvo ${n} commit(s) desde la propuesta: revisar antes de aprobar`;
+    }
+    out.push(`  [${status}] ${f.replace(/\.md$/, '')} — ${title} · esfuerzo ${effort}${stale}`);
+  }
+  console.log([`${out.length} propuesta(s) en ${PROPOSALS}:`, ...out].join('\n'));
+}
+
+// ── session (agrupar planes y propuestas) ──────────────────────────────────────────────
+/**
+ * Una sesión agrupa planes y propuestas que se trabajan juntos (un frente, un sprint, un grupo de
+ * funcionalidades que se cruzan). No mueve nada: los planes siguen en work/ y las propuestas en
+ * proposals/; la sesión solo los referencia en `.claude/pa/sessions/<nombre>/session.md`, y su carpeta
+ * guarda lo que se decida sobre el grupo (la sección Coordinación de /pa-reconcile).
+ */
+const SESSIONS = '.claude/pa/sessions';
+
+function sessionFile(name) { return join(ROOT, SESSIONS, name, 'session.md'); }
+
+/**
+ * Prefijos: `plan-<slug>.md` en work/ (la tarea de una rama) y `prop-<slug>.md` en proposals/. El
+ * prefijo dice qué es sin abrir el archivo; la rama sigue siendo `feat/<slug>`, sin prefijo.
+ */
+export const PREFIX = { plan: 'plan-', propuesta: 'prop-' };
+
+function docKind(slug) {
+  if (existsSync(join(ROOT, WORK, `${slug}.md`))) return 'plan';
+  if (existsSync(join(ROOT, PROPOSALS, `${slug}.md`))) return 'propuesta';
+  return null;
+}
+
+/** Todos los .md que pueden citar a otro documento: planes, propuestas y sesiones. */
+function allDocFiles() {
+  const out = [];
+  for (const dir of [WORK, PROPOSALS]) {
+    const abs = join(ROOT, dir);
+    if (existsSync(abs)) out.push(...readdirSync(abs).filter((f) => f.endsWith('.md') && !f.startsWith('backtest-')).map((f) => join(abs, f)));
+  }
+  const sdir = join(ROOT, SESSIONS);
+  if (existsSync(sdir)) out.push(...readdirSync(sdir).map((d) => join(sdir, d, 'session.md')).filter((f) => existsSync(f)));
+  return out;
+}
+
+/**
+ * Cambia un slug por otro en un texto: las rutas `work/<slug>.md` / `proposals/<slug>.md` y el slug como
+ * palabra suelta. Nunca dentro de otra ruta ni de un nombre de rama: `feat/<slug>` queda igual.
+ */
+function replaceSlug(text, from, to, { paths = true } = {}) {
+  const s = from.replace(/[-]/g, '\\-');
+  return (paths ? text.replace(new RegExp(`((?:work|proposals)/)${s}\\.md`, 'g'), `$1${to}.md`) : text)
+    // Un punto final de frase sí se reemplaza; `.md` (parte de una ruta) no.
+    .replace(new RegExp(`(?<![\\w\\-/])${s}(?![\\w\\-/]|\\.md)`, 'g'), to);
+}
+
+/** Reemplaza un slug por otro en todos los documentos; devuelve cuántos tocó. */
+function replaceSlugEverywhere(from, to) {
+  let touched = 0;
+  for (const f of allDocFiles()) {
+    const text = readFileSync(f, 'utf8');
+    const next = replaceSlug(text, from, to);
+    if (next !== text) { writeFileSync(f, next); touched++; }
+  }
+  return touched;
+}
+
+/**
+ * Las sesiones se corrigen solas: una propuesta convertida pasa a ser su plan como miembro; un miembro
+ * que ya no existe se avisa. Mecánico y barato, corre antes de session/overlap/proposals.
+ */
+function syncSessions() {
+  const dir = join(ROOT, SESSIONS);
+  if (!existsSync(dir)) return [];
+  const notes = [];
+  for (const name of readdirSync(dir).filter((d) => existsSync(join(dir, d, 'session.md')))) {
+    const { members } = readSession(name);
+    let changed = false;
+    const next = members.map((m) => {
+      if (m.kind !== 'propuesta') return m;
+      // Convertida: se borró y existe plan-<mismo slug>, o quedó marcada (convert --keep o a mano).
+      const p = join(ROOT, PROPOSALS, `${m.slug}.md`);
+      const twin = `${PREFIX.plan}${m.slug.replace(new RegExp(`^${PREFIX.propuesta}`), '')}`;
+      const target = existsSync(p)
+        ? readFileSync(p, 'utf8').match(/^Estado:\s*convertida\s*→\s*\S*?([a-z0-9-]+)\.md/m)?.[1]
+        : twin;
+      if (!target || !existsSync(join(ROOT, WORK, `${target}.md`))) return m;
+      changed = true;
+      notes.push(`sesión ${name}: ${m.slug} → ${target} (propuesta convertida)`);
+      return { kind: 'plan', slug: target };
+    }).filter((m, i, all) => all.findIndex((x) => x.slug === m.slug) === i);
+    if (changed) writeMembers(name, next);
+  }
+  return notes;
+}
+
+/** Sección donde `convert` archiva la propuesta dentro del plan. `tasks`, `gate` y `overlap` la omiten. */
+const ARCHIVE = '## Propuesta original';
+function withoutArchive(text) {
+  const i = text.indexOf(`\n${ARCHIVE}`);
+  if (i < 0) return text;
+  const rest = text.slice(i + 1);
+  const next = rest.slice(ARCHIVE.length).search(/\n## /);
+  return next < 0 ? text.slice(0, i + 1) : text.slice(0, i + 1) + rest.slice(ARCHIVE.length + next + 1);
+}
+
+/**
+ * Después de que /pa-define-task escribió el plan desde una propuesta: archiva lo que la propuesta
+ * tenía y el plan no repite (alternativas, riesgos, preguntas) en una sección del plan que no se lee al
+ * trabajar, enlaza el origen, pasa las sesiones y las referencias al plan y **borra la propuesta**
+ * (`--keep` la conserva marcada como convertida). Todo por script: cero tokens del modelo.
+ */
+function cmdConvert(prop, plan) {
+  if (!prop || !existsSync(join(ROOT, PROPOSALS, `${prop}.md`))) { console.error('uso: pa.mjs convert <prop-slug> [plan-slug] [--keep]  (la propuesta no existe)'); process.exit(2); }
+  plan = plan || `${PREFIX.plan}${prop.replace(new RegExp(`^${PREFIX.propuesta}`), '')}`;
+  const planPath = join(ROOT, WORK, `${plan}.md`);
+  if (!existsSync(planPath)) { console.error(`primero el plan: ${WORK}/${plan}.md no existe (lo escribe /pa-define-task)`); process.exit(2); }
+  const date = new Date().toISOString().slice(0, 10);
+  const propPath = join(ROOT, PROPOSALS, `${prop}.md`);
+  const propText = readFileSync(propPath, 'utf8').replace(/\r\n/g, '\n');
+
+  // 1. Archivo: el cuerpo de la propuesta sin título ni estado, y sin su Coordinación (el plan tiene la suya).
+  let planText = readFileSync(planPath, 'utf8').replace(/\r\n/g, '\n');
+  if (!planText.includes(ARCHIVE)) {
+    const body = propText.replace(/^#[^\n]*\n/, '').replace(/^(Estado|Fecha):[^\n]*\n/gm, '')
+      .replace(/\n## Coordinación\n[\s\S]*?(?=\n## |$)/, '').trim()
+      .replace(/^## /gm, '### ');
+    const title = propText.match(/^# (.+)/m)?.[1] ?? prop;
+    planText = `${planText.trimEnd()}\n\n${ARCHIVE}\n<!-- ${prop}: "${title}", archivada al convertir (${date}). tasks, gate y overlap no leen esta sección. -->\n${body}\n`;
+  }
+  const origin = `Origen: propuesta \`${prop}\` (convertida ${date}; su contenido, en *Propuesta original*)`;
+  planText = /^Origen:/m.test(planText) ? planText.replace(/^Origen:.*$/m, origin) : planText.replace(/^(# .*\n)/, `$1${origin}\n`);
+  writeFileSync(planPath, planText);
+
+  // 2. Sesiones: el miembro pasa de la propuesta al plan, antes de borrarla.
+  const sdir = join(ROOT, SESSIONS);
+  const sessions = [];
+  if (existsSync(sdir)) for (const name of readdirSync(sdir).filter((d) => existsSync(join(sdir, d, 'session.md')))) {
+    const { members } = readSession(name);
+    if (!members.some((m) => m.slug === prop)) continue;
+    writeMembers(name, members.map((m) => (m.slug === prop ? { kind: 'plan', slug: plan } : m))
+      .filter((m, i, all) => all.findIndex((x) => x.slug === m.slug) === i));
+    sessions.push(`sesión ${name}: ${prop} → ${plan}`);
+  }
+
+  // 3. Referencias: slug y ruta de la propuesta pasan a ser los del plan (la línea Origen ya está bien).
+  let refs = 0;
+  for (const f of allDocFiles().filter((x) => !x.endsWith(`${prop}.md`))) {
+    const text = readFileSync(f, 'utf8');
+    // Origen y el comentario del archivo nombran la propuesta a propósito; los miembros ya se cambiaron.
+    const next = text.split('\n').map((l) => (/^Origen:|^- (plan|propuesta): |archivada al convertir/.test(l) ? l
+      : replaceSlug(l, prop, plan).replace(new RegExp(`proposals/${plan}\\.md`, 'g'), `work/${plan}.md`))).join('\n');
+    if (next !== text) { writeFileSync(f, next); refs++; }
+  }
+
+  // 4. La propuesta se borra (o queda marcada como convertida, con --keep).
+  if (args.keep) writeFileSync(propPath, propText.replace(/^Estado:.*$/m, `Estado: convertida → ${WORK}/${plan}.md (${date})`));
+  else rmSync(propPath);
+  console.log([`convertida: ${prop} → ${plan}`,
+    args.keep ? 'propuesta conservada (--keep)' : `propuesta borrada; su contenido quedó en ${WORK}/${plan}.md, sección "Propuesta original"`,
+    `referencias actualizadas en ${refs} documento(s)`, ...sessions].join('\n'));
+}
+
+/** Migración única: agrega los prefijos a los documentos sin prefijo y actualiza todas las referencias. */
+function cmdPrefixDocs() {
+  const out = [];
+  for (const [dir, kind] of [[WORK, 'plan'], [PROPOSALS, 'propuesta']]) {
+    const abs = join(ROOT, dir);
+    if (!existsSync(abs)) continue;
+    for (const f of readdirSync(abs).filter((x) => x.endsWith('.md') && !x.startsWith('backtest-') && !x.startsWith(PREFIX[kind]))) {
+      const slug = f.replace(/\.md$/, '');
+      const next = `${PREFIX[kind]}${slug.replace(/^(plan|prop)-/, '')}`;
+      if (existsSync(join(abs, `${next}.md`))) { out.push(`  ya existe ${dir}/${next}.md: ${f} sin tocar`); continue; }
+      if (!args['dry-run']) {
+        writeFileSync(join(abs, `${next}.md`), readFileSync(join(abs, f), 'utf8'));
+        rmSync(join(abs, f));
+      }
+      const refs = args['dry-run'] ? 0 : replaceSlugEverywhere(slug, next);
+      out.push(`  ${dir}/${f} → ${next}.md (${refs} documento(s) con referencias actualizadas)`);
+    }
+  }
+  console.log(out.length ? [`${args['dry-run'] ? 'simulación' : 'renombrados'}:`, ...out].join('\n') : 'todos los documentos ya tienen prefijo');
+}
+
+function readSession(name) {
+  const f = sessionFile(name);
+  if (!existsSync(f)) { console.error(`no existe la sesión "${name}" (node .claude/pa/pa.mjs session list)`); process.exit(2); }
+  // Normalizado a \n: un session.md editado en Windows (CRLF) no debe romper la lectura de miembros.
+  const text = readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const members = [...text.matchAll(/^- (plan|propuesta): ([a-z0-9-]+)/gm)].map((m) => ({ kind: m[1], slug: m[2] }));
+  return { text, members, status: text.match(/^Estado:\s*(\S+)/m)?.[1] ?? 'activa' };
+}
+
+function writeMembers(name, members) {
+  const f = sessionFile(name);
+  const text = readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const block = `## Miembros\n${members.map((m) => `- ${m.kind}: ${m.slug}`).join('\n') || '- (ninguno)'}\n`;
+  writeFileSync(f, text.replace(/## Miembros\n(?:- [^\n]*\n)*/, block));
+}
+
+function resolveMembers(slugs) {
+  const ok = [], missing = [];
+  for (const s of slugs) { const kind = docKind(s); kind ? ok.push({ kind, slug: s }) : missing.push(s); }
+  if (missing.length) { console.error(`no existe plan ni propuesta: ${missing.join(', ')}`); process.exit(2); }
+  return ok;
+}
+
+function cmdSession(sub, name, rest) {
+  for (const n of syncSessions()) console.log(n);
+  if (sub === 'list' || !sub) return sessionList();
+  if (!name || !/^[a-z0-9][a-z0-9-]*$/.test(name)) { console.error('uso: pa.mjs session new|add|remove|show|close <nombre-kebab> [slug…] | session list'); process.exit(2); }
+  if (sub === 'new') {
+    if (existsSync(sessionFile(name))) { console.error(`la sesión "${name}" ya existe: usa session add`); process.exit(2); }
+    const members = resolveMembers(rest);
+    mkdirSync(dirname(sessionFile(name)), { recursive: true });
+    writeFileSync(sessionFile(name), [
+      `# Sesión: ${name}`, '', 'Estado: activa', `Fecha: ${new Date().toISOString().slice(0, 10)}`,
+      `Objetivo: ${typeof args.goal === 'string' ? args.goal : '<qué agrupa esta sesión y por qué>'}`, '',
+      '## Miembros', ...(members.length ? members.map((m) => `- ${m.kind}: ${m.slug}`) : ['- (ninguno)']), '',
+      '## Coordinación', '<!-- la escribe /pa-reconcile --session: un cruce por línea, con su decisión -->', '',
+    ].join('\n'));
+    console.log(`sesión creada: ${SESSIONS}/${name}/session.md con ${members.length} miembro(s)`);
+    return;
+  }
+  const s = readSession(name);
+  if (sub === 'add' || sub === 'remove') {
+    const change = resolveMembers(rest);
+    const members = sub === 'add'
+      ? [...s.members, ...change.filter((c) => !s.members.some((m) => m.slug === c.slug))]
+      : s.members.filter((m) => !change.some((c) => c.slug === m.slug));
+    writeMembers(name, members);
+    console.log(`sesión ${name}: ${members.length} miembro(s)`);
+    return;
+  }
+  if (sub === 'close') {
+    writeFileSync(sessionFile(name), s.text.replace(/^Estado:.*$/m, `Estado: cerrada (${new Date().toISOString().slice(0, 10)})`));
+    console.log(`sesión ${name} cerrada (sus planes y propuestas siguen donde están)`);
+    return;
+  }
+  if (sub === 'show') {
+    const out = [`sesión ${name} [${s.status}] — ${s.text.match(/^Objetivo:\s*(.*)$/m)?.[1] ?? ''}`];
+    for (const m of s.members) {
+      const path = join(ROOT, m.kind === 'plan' ? WORK : PROPOSALS, `${m.slug}.md`);
+      if (!existsSync(path)) { out.push(`  ${m.kind} ${m.slug} — NO EXISTE (¿se borró o renombró?)`); continue; }
+      const text = readFileSync(path, 'utf8');
+      const detail = m.kind === 'plan'
+        ? `${(text.match(/^\s*- \[ \]/gm) || []).length} abiertas, ${(text.match(/^\s*- \[x\]/gim) || []).length} hechas · ${text.match(/^Branch:\s*`([^`]+)`/m)?.[1] ?? 'sin rama'}`
+        : `${text.match(/^Estado:\s*([^\n·]+)/m)?.[1]?.trim() ?? '?'}`;
+      const coord = (text.match(/^## Coordinación\n((?:- .*\n?)*)/m)?.[1] ?? '').split('\n').filter(Boolean).length;
+      out.push(`  ${m.kind.padEnd(9)} ${m.slug} — ${detail}${coord ? ` · ${coord} nota(s) de coordinación` : ''}`);
+    }
+    out.push(`cruces: node .claude/pa/pa.mjs overlap --session ${name}   ·   conciliar: /pa-reconcile --session ${name}`);
+    console.log(out.join('\n'));
+    return;
+  }
+  console.error(`subcomando desconocido: ${sub}`);
+  process.exit(2);
+}
+
+function sessionList() {
+  const dir = join(ROOT, SESSIONS);
+  const names = existsSync(dir) ? readdirSync(dir).filter((d) => existsSync(join(dir, d, 'session.md'))).sort() : [];
+  const assigned = new Set();
+  const out = [`${names.length} sesión(es) en ${SESSIONS}:`];
+  for (const n of names) {
+    const s = readSession(n);
+    s.members.forEach((m) => assigned.add(m.slug));
+    out.push(`  [${s.status}] ${n} — ${s.members.length} miembro(s): ${s.members.map((m) => m.slug).join(', ') || '—'}`);
+  }
+  const all = overlapDocs().map((d) => d.id);
+  const loose = all.filter((id) => !assigned.has(id));
+  out.push(loose.length ? `sin sesión: ${loose.join(', ')}` : 'todos los planes y propuestas activos tienen sesión');
+  console.log(out.join('\n'));
+}
+
+// ── overlap (cruce entre planes y propuestas) ──────────────────────────────────────────
+/**
+ * Dónde se tocan varios planes y propuestas: rutas, endpoints, símbolos, tablas, permisos y
+ * migraciones que citan dos o más documentos, con la línea de cada uno. La skill /pa-reconcile lee
+ * solo esas líneas para juzgar si hay contradicción, duplicación o dependencia, en vez de releer
+ * todos los documentos enteros (5 documentos ≈ 9k tokens; las líneas que se cruzan, una fracción).
+ */
+const OVERLAP_KINDS = [
+  ['ruta', /`(apps\/[^`\s:]+?)(?::\d+)?`/g, (m) => m[1]],
+  ['endpoint', /\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[A-Za-z0-9/:{}_.-]+)/g, (m) => `${m[1]} ${m[2].replace(/\/$/, '')}`],
+  // Solo los esquemas reales de la base: `blackboard.view` es un permiso y `page.tsx` un archivo.
+  ['tabla', /`((?:system|portfolio|audit|blackboard|academic)\.(?!(?:view|edit|create|delete|manage|download|upload)\b)[a-z_]+)`/g, (m) => m[1]],
+  ['permiso', /`?\b(academico|auditoria|blackboard|evidencias|parametros|roles|usuarios|s3|details)\.(view|edit|create|delete|manage|download|upload)\b`?|@RequirePermission\('([a-z]+)',\s*'([a-z]+)'\)/g,
+    (m) => (m[1] ? `${m[1]}.${m[2]}` : `${m[3]}.${m[4]}`)],
+  ['símbolo', /`([A-Z][A-Za-z0-9]{3,})`/g, (m) => m[1]],
+];
+
+function overlapDocs() {
+  const docs = [];
+  for (const [dir, kind] of [[WORK, 'plan'], [PROPOSALS, 'propuesta']]) {
+    const abs = join(ROOT, dir);
+    if (!existsSync(abs)) continue;
+    for (const f of readdirSync(abs).filter((x) => x.endsWith('.md') && !x.startsWith('backtest-'))) {
+      const text = withoutArchive(readFileSync(join(abs, f), 'utf8').replace(/\r\n/g, '\n'));
+      const status = text.match(/^Estado:\s*([^\n·]+)/m)?.[1]?.trim() ?? '';
+      if (/^(convertida|descartada)/i.test(status)) continue; // ya no compiten por nada
+      docs.push({ id: f.replace(/\.md$/, ''), path: `${dir}/${f}`, kind, text,
+        branch: text.match(/^Branch:\s*`([^`]+)`/m)?.[1] ?? null,
+        migration: kind === 'plan' ? plansMigration(text) : /migración: sí|tabla nueva|nueva tabla|columna nueva/i.test(text) });
+    }
+  }
+  return docs;
+}
+
+function cmdOverlap(only) {
+  for (const n of syncSessions()) console.log(n);
+  let docs = overlapDocs();
+  if (typeof args.session === 'string') {
+    const { members } = readSession(args.session);
+    only = [...only, ...members.map((m) => m.slug)];
+  }
+  if (only.length) docs = docs.filter((d) => only.some((o) => d.id === o || d.path === norm(o)));
+  if (docs.length < 2) { console.log(`hacen falta al menos 2 documentos activos (hay ${docs.length})`); return; }
+  // ítem → doc → líneas
+  const index = new Map();
+  for (const d of docs) {
+    d.text.split('\n').forEach((line, i) => {
+      for (const [kind, re, pick] of OVERLAP_KINDS) {
+        for (const m of line.matchAll(re)) {
+          const key = `${kind}\u0000${pick(m)}`;
+          const byDoc = index.get(key) ?? index.set(key, new Map()).get(key);
+          (byDoc.get(d.id) ?? byDoc.set(d.id, []).get(d.id)).push(i + 1);
+        }
+      }
+    });
+  }
+  // Endpoints que comparten prefijo (/blackboard/courses y /blackboard/courses/:id/…) también se tocan.
+  const endpoints = [...index.keys()].filter((k) => k.startsWith('endpoint\u0000'));
+  for (const a of endpoints) for (const b of endpoints) {
+    const pa = a.split(' ')[1], pb = b.split(' ')[1];
+    if (a !== b && pb.startsWith(`${pa}/`)) for (const [doc, ls] of index.get(b)) {
+      const tgt = index.get(a);
+      if (!tgt.has(doc)) tgt.set(doc, ls.map((l) => -l)); // negativo = por prefijo
+    }
+  }
+  const pairs = new Map();
+  for (const [key, byDoc] of index) {
+    const ids = [...byDoc.keys()];
+    if (ids.length < 2) continue;
+    const [kind, value] = key.split('\u0000');
+    for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
+      const k = [ids[i], ids[j]].sort().join(' ↔ ');
+      (pairs.get(k) ?? pairs.set(k, []).get(k)).push({ kind, value, lines: Object.fromEntries(ids.filter((x) => x === ids[i] || x === ids[j]).map((x) => [x, byDoc.get(x)])) });
+    }
+  }
+  const WEIGHT = { ruta: 3, endpoint: 3, tabla: 3, permiso: 1, símbolo: 2 };
+  const ranked = [...pairs].map(([k, items]) => ({ k, items, score: items.reduce((s, it) => s + WEIGHT[it.kind], 0) }))
+    .sort((a, b) => b.score - a.score);
+  const byId = Object.fromEntries(docs.map((d) => [d.id, d]));
+  const out = [`${docs.length} documentos activos: ${docs.map((d) => `${d.id} (${d.kind}${d.branch ? `, ${d.branch}` : ''})`).join(' · ')}`];
+  for (const { k, items, score } of ranked) {
+    const [a, b] = k.split(' ↔ ');
+    const notes = [];
+    if (byId[a].migration && byId[b].migration) notes.push('los dos tocan el schema: migraciones a ordenar en un solo PR o en secuencia');
+    if (byId[a].branch && byId[b].branch && byId[a].branch !== byId[b].branch && items.some((it) => it.kind === 'ruta')) notes.push('ramas distintas sobre los mismos archivos: conflicto de merge probable — candidatas a una sola rama/PR');
+    out.push('', `${k}  (peso ${score}, ${items.length} cruce(s))${notes.length ? `\n  ! ${notes.join('\n  ! ')}` : ''}`);
+    for (const it of items.sort((x, y) => WEIGHT[y.kind] - WEIGHT[x.kind]).slice(0, Number(args.top || 15))) {
+      const where = Object.entries(it.lines).map(([doc, ls]) => `${doc}:${[...new Set(ls.map((l) => Math.abs(l)))].slice(0, 4).join(',')}${ls.some((l) => l < 0) ? '(prefijo)' : ''}`).join(' · ');
+      out.push(`  ${it.kind.padEnd(8)} ${it.value.slice(0, 70)}  →  ${where}`);
+    }
+    if (items.length > Number(args.top || 15)) out.push(`  … ${items.length - Number(args.top || 15)} cruce(s) más (--top N)`);
+  }
+  const isolated = docs.filter((d) => ![...pairs.keys()].some((k) => k.split(' ↔ ').includes(d.id)));
+  if (isolated.length) out.push('', `sin cruces: ${isolated.map((d) => d.id).join(', ')}`);
+  console.log(out.join('\n'));
 }
 
 // ── module ──────────────────────────────────────────────────────────────────────────────
@@ -988,7 +1443,8 @@ const COMMANDS = {
   diff: cmdDiff, test: () => cmdTest(args._), fix: () => cmdFix(args._), outline: () => cmdOutline(norm(args._[0] || '')),
   migration: () => cmdMigration(args._[0]), pr: cmdPr, gate: () => cmdGate(args._[0]),
   tasks: () => cmdTasks(args._[0]), exec: cmdExec, backtest: cmdBacktest,
-  module: () => cmdModule(args._), debt: cmdDebt, ledger: () => cmdLedger(args._[0], args._[1]),
+  module: () => cmdModule(args._), debt: cmdDebt, impact: () => cmdImpact(args._), proposals: cmdProposals, overlap: () => cmdOverlap(args._), session: () => cmdSession(args._[0], args._[1], args._.slice(2)),
+  convert: () => cmdConvert(args._[0], args._[1]), 'prefix-docs': cmdPrefixDocs, ledger: () => cmdLedger(args._[0], args._[1]),
 };
 if (COMMANDS[mode]) COMMANDS[mode]();
 else { console.error(`uso: pa.mjs ${Object.keys(COMMANDS).join('|')} (ver la cabecera del archivo)`); process.exit(2); }

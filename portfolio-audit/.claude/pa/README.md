@@ -17,6 +17,8 @@ lib/security.mjs       reglas de seguridad (alcance = careerCode / usuario / rut
 test/rules.test.mjs    recall: cada regla detecta su patrón sembrado y calla ante el correcto
 work/                  planes por rama y resultados de backtest (ignorado por git)
 modules.json           módulo → rutas y docs cortos (pa.mjs module)
+proposals/prop-<slug>.md    propuestas de funcionalidades de /pa-plan-feature (flujo aparte: planificar
+                       no compromete a construir; aprobada → /pa-define-task la convierte en tarea)
 ledger/<rama>.jsonl    registro de auditorías, un archivo por rama
 ```
 

@@ -26,8 +26,13 @@ try {
   const exceptions = join(project, '.claude/pa/naming-exceptions.txt');
   if (existsSync(exceptions) && readFileSync(exceptions, 'utf8').split('\n').map((l) => l.replace(/#.*/, '').trim()).includes(rel)) process.exit(0);
 
+  // Planes y propuestas llevan el prefijo que dice qué son: los scripts los reconocen por el nombre.
+  const doc = rel.match(/^\.claude\/pa\/(work|proposals)\/([^/]+)\.md$/);
+  const docPrefix = doc && !doc[2].startsWith('backtest-') ? (doc[1] === 'work' ? 'plan-' : 'prop-') : null;
   const listDir = (dir) => execFileSync('git', ['ls-files', '--', dir], { cwd: project, encoding: 'utf8' }).split('\n').filter(Boolean);
-  const problem = checkNewPath(rel, listDir);
+  const problem = docPrefix && !doc[2].startsWith(docPrefix)
+    ? { msg: `en ${doc[1]}/ el nombre empieza con "${docPrefix}" (${docPrefix}${doc[2].replace(/^(plan|prop)-/, '')}.md)` }
+    : checkNewPath(rel, listDir);
   if (!problem) process.exit(0);
 
   process.stdout.write(JSON.stringify({
